@@ -1,0 +1,13 @@
+Metadata-Version: 2.1
+Name: ysrd-linter
+Version: 1.0
+Summary: linter by ysrd
+Home-page: http://10.10.8.64:9980/Keylistener0429/ysrd-linter
+Author: Wang Feihong
+Author-email: 
+License: YSRD Licence
+Keywords: ysrd,linter
+Platform: any
+
+linter include google std and ysrd std
+
