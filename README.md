@@ -29,4 +29,11 @@ Ysrd Linter是融合了google代码规范及公司内部一些开发规范形成
 
 不在控制台打印信息
 
-    ysrd_linter.check(if_print=False)
+    ysrd_linter.check(if_print=False,if_csv=False)
+    
+
+输出统计文件
+    
+    ysrd_linter.check(if_print=False,if_csv=True)
+
+

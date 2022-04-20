@@ -14,6 +14,10 @@ setup(
   
  packages = find_packages(), 
  include_package_data = True, 
+ install_package_data = True,
+ package_data = {
+        '': ['*.conf'],
+ },
  platforms = "any", 
  install_requires = ['pylint==2.13.2','chardet==4.0.0'], 
   

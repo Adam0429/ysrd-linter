@@ -1,6 +1,7 @@
 README.md
 setup.py
 ysrd_linter/__init__.py
+ysrd_linter/google_standard.conf
 ysrd_linter/ysrd_linter.py
 ysrd_linter.egg-info/PKG-INFO
 ysrd_linter.egg-info/SOURCES.txt
