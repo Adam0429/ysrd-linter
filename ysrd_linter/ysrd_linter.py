@@ -1,6 +1,7 @@
 import os
 import re
 import tokenize
+import traceback
 import chardet
 import pandas as pd
 from pylint.lint import Run as PylintRun
@@ -10,13 +11,63 @@ from astroid.nodes.node_classes import ImportFrom
 from astroid.nodes.node_classes import Import
 from astroid.nodes.scoped_nodes.scoped_nodes import FunctionDef
 from astroid.nodes.scoped_nodes.scoped_nodes import ClassDef
+import psutil
+import multiprocessing
 
+
+class Process(multiprocessing.Process):
+    # 包装多进程，使主进程可以捕获exception
+
+    def __init__(self, *args, **kwargs):
+        multiprocessing.Process.__init__(self, *args, **kwargs)
+        self._pconn, self._cconn = multiprocessing.Pipe()
+        self._exception = None
+
+    def run(self):
+        try:
+            multiprocessing.Process.run(self)
+            self._cconn.send(None)
+        except Exception as e:
+            tb = traceback.format_exc()
+            self._cconn.send((e, tb))
+
+    @property
+    def exception(self):
+        if self._pconn.poll():
+            self._exception = self._pconn.recv()
+        return self._exception
+
+
+def pylint_check(input, output):
+    """
+    pylint管理资源异常(不释放内存)问题，占用内存会随着程序运行时间一直增大，网上没有解决方案。
+    因此用多进程运行pylint程序，结束即杀死，可以解决这个问题。用多线程测试时无法解决，子线程结束后，主进程依然占用线程的内存资源
+    https://github.com/PyCQA/astroid/issues/792
+    https://rtpg.co/2020/10/12/pylint-usage.html
+    """
+    argv = [f'--rcfile={os.path.dirname(__file__)}/google_standard.conf', f'--output={output}', input]
+    PylintRun(argv, do_exit=False)
+    # print('pylint_check进程：', os.getpid(), '当前进程的内存使用：%.4f M' % (psutil.Process(os.getpid()).memory_info().rss / 1024 / 1024))
+
+
+class AstNodeException(Exception):
+    def __init__(self, msg):
+        self.msg = msg
+
+    def __str__(self):
+        return (self.msg)
+
+class FilePathException(Exception):
+    def __init__(self, msg):
+        self.msg = msg
+
+    def __str__(self):
+        return (self.msg)
 
 class YsrdLinter():
     def __init__(self, filepath, output=None):
         if not os.path.exists(filepath):
-            print(filepath, '路径不存在！')
-            exit()
+            raise FilePathException(f'{filepath} 路径不存在')
 
         filepath = os.path.abspath(filepath).replace(os.getcwd() + '/', '')
 
@@ -45,8 +96,7 @@ class YsrdLinter():
             self.filepath = filepath
 
         else:
-            print('文件不符合要求，要求文件夹或者py格式!')
-            exit()
+            raise FilePathException(f'f{filepath}不符合要求，要求文件夹或者py格式!')
 
     def init_folder(self, path):
         """第一层 __init__.py必加"""
@@ -71,14 +121,22 @@ class YsrdLinter():
             self.singfilechecker.check(if_print=if_print)
 
         elif hasattr(self, 'filepaths'):
-            argv = [f'--rcfile={os.path.dirname(__file__)}/google_standard.conf', f'--output={self.output}', self.module_path]
+
             # os.path.dirname(__file__) 获取google_standard.conf在python库中的位置
-            PylintRun(argv, do_exit=False)
+            p1 = Process(target=pylint_check, kwargs={'input': self.module_path, 'output': self.output})
+            p1.start()
+            p1.join()
+            if p1.exception:
+                exception, traceback = p1.exception
+                p1.terminate()
+                raise exception
+
+
             with open(self.output, 'a') as f:
                 f.write('************* ysrdlinter' + '\n')
             for file in self.filepaths:
                 self.singfilechecker = SingleFilechecker(file, self.output)
-                self.singfilechecker.check(if_pylink=False, if_print=if_print)
+                self.singfilechecker.check(if_pylint=False, if_print=if_print)
 
         if if_csv:
             self.output_csv()
@@ -126,8 +184,7 @@ class SingleFilechecker():
 
     def __init__(self, filepath, output=None):
         if not os.path.exists(filepath):
-            print(filepath, '路径不存在！')
-            exit()
+            raise FilePathException(f'{filepath} 路径不存在')
 
         self.filepath = os.path.abspath(filepath).replace(os.getcwd() + '/', '')
         if output == None:
@@ -137,10 +194,13 @@ class SingleFilechecker():
 
         self.pylinter = PyLinter()
         self.file = FileItem(name=filepath, filepath=filepath, modpath=filepath)
-        self.ast_node = self.pylinter.get_ast(self.file.filepath, self.file.name)
-        self.body = self.ast_node.body
-        self.basic_items_lst = []
-        self.basic_items
+        try:
+            self.ast_node = self.pylinter.get_ast(self.file.filepath, self.file.name)
+            self.body = self.ast_node.body
+            self.basic_items_lst = []
+            self.basic_items
+        except:
+            raise AstNodeException(f'{self.filepath} raise AstNodeException!')
         self.get_comments()
 
     def write(self, text):
@@ -264,13 +324,15 @@ class SingleFilechecker():
                 if length > min_length and item.doc == None:
                     self.write(f'{self.filepath}:{item.fromlineno}:NC001:[{item.name}] Function or Class has no comments (no comments)')
 
-    def pylink_check(self):
-        argv = [f'--rcfile={os.path.dirname(__file__)}/google_standard.conf', f'--output={self.output}', self.filepath]
-        PylintRun(argv, do_exit=False)
-
-    def check(self, if_pylink=True, if_print=True):
-        if if_pylink:
-            self.pylink_check()
+    def check(self, if_pylint=True, if_print=True):
+        if if_pylint:
+            p1 = Process(target=pylint_check, kwargs={'input': self.filepath, 'output': self.output})
+            p1.start()
+            p1.join()
+            if p1.exception:
+                exception, traceback = p1.exception
+                p1.terminate()
+                raise exception
         self.check_func_line()
         self.check_class_def_number()
         self.check_comments()
@@ -281,3 +343,10 @@ class SingleFilechecker():
         fileObj = open(self.output, 'r')
         for line in fileObj.readlines():
             print(line)
+
+"""
+由于使用多进程的原因
+程序需要在
+if __name__ == '__main__':
+下执行
+"""
