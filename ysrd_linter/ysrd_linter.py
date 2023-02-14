@@ -13,6 +13,8 @@ from astroid.nodes.scoped_nodes.scoped_nodes import FunctionDef
 from astroid.nodes.scoped_nodes.scoped_nodes import ClassDef
 import psutil
 import multiprocessing
+import importlib
+import inspect
 
 
 class Process(multiprocessing.Process):
@@ -57,12 +59,14 @@ class AstNodeException(Exception):
     def __str__(self):
         return (self.msg)
 
+
 class FilePathException(Exception):
     def __init__(self, msg):
         self.msg = msg
 
     def __str__(self):
         return (self.msg)
+
 
 class YsrdLinter():
     def __init__(self, filepath, output=None):
@@ -113,7 +117,7 @@ class YsrdLinter():
                             f.write('')
                         break
 
-    def check(self, if_print=True,if_csv=False):
+    def check(self, if_print=True, if_csv=False):
         if hasattr(self, 'filepath'):
             with open(self.output, 'a') as f:
                 f.write('************* ysrdlinter' + '\n')
@@ -130,7 +134,6 @@ class YsrdLinter():
                 exception, traceback = p1.exception
                 p1.terminate()
                 raise exception
-
 
             with open(self.output, 'a') as f:
                 f.write('************* ysrdlinter' + '\n')
@@ -156,7 +159,7 @@ class YsrdLinter():
             if 'indent' in locals().keys():
                 lineno += ':' + indent
 
-            error_type = re.findall('\(.*?\)', line)[-1].replace('(','').replace(')','')
+            error_type = re.findall('\(.*?\)', line)[-1].replace('(', '').replace(')', '')
 
             datas.append({
                 '文件名': file,
@@ -178,6 +181,254 @@ class YsrdLinter():
         df_stat['代码'] = list(df['错误代码'].value_counts().index)
 
         df_stat.to_csv(self.csv_path, encoding='gb18030', index=None)
+
+    @property
+    def project_type(self):
+        """
+        判断项目属于前端还是api-framework或者yard-base或前端
+        :return:
+        """
+        all_files = []
+        all_dirs = []
+        for root, dirs, files in os.walk(self.module_path, topdown=False):
+            all_files.extend(files)
+            all_dirs.extend(dirs)
+        if 'package.json' in all_files:
+            return 'frontend'
+        elif 'runserver.py' in all_files:
+            if 'bin' in all_dirs:
+                return 'yard-base'
+            else:
+                return 'api-framework'
+        else:
+            return 'other'
+
+    def check_f_string(self, text):
+        if 'f"' in text or "f'" in text:
+            if '{' in text and '}' in text:
+                return True
+            if '}' in text and '{' in text:
+                return True
+        return False
+
+    def check_comment(self, text):
+        text = text.replace(' ', '')
+        if text[0] == '#':
+            return True
+        return False
+
+    def recover_f_string(self, f_string, lines):
+        var_reg = '(?<={).+?(?=\})'
+        var_names = re.findall(var_reg, f_string)
+        var_dict = {}
+        for var_name in var_names:
+            for line in lines:
+                if f_string == line:
+                    break
+                line = line.replace(' ', '')
+                reg = f'(?<={var_name}\=[\'\"]).+?(?=[\'\"])'
+                var_value = re.findall(reg, line)
+                if len(var_value) != 0:
+                    var_dict[var_name] = var_value[0]
+        for var_name in var_dict.keys():
+            f_string = f_string.replace('{' + f'{var_name}' + '}', var_dict[var_name])
+        return f_string.replace(' ', '')
+
+    def extract_sql_url(self):
+        datas = []
+        for root, dirs, files in os.walk(self.module_path, topdown=False):
+            for file in files:
+                if os.path.splitext(file)[1] == '.py':
+                    filepath = os.path.join(root, file)
+                    with open(filepath, 'r') as f:
+                        lines = f.readlines()
+                        for idx, line in enumerate(lines):
+                            sql_urls = self.extract_sql_url_from_line(line, lines)
+                            if len(sql_urls) == 0:
+                                continue
+                            data = [
+                                {'file': os.path.abspath(filepath).replace(self.module_path, ''),
+                                 'sql_url': sql_url.replace(re.findall('(?<=\/\/).+?(?=\@)', sql_url)[0], '账号密码已打码'), # 这里加密一下密码字段
+                                 'line': idx + 1, 'text': line} for sql_url in sql_urls]
+                            datas.extend(data)
+        df = pd.DataFrame(datas)
+        df.index = [i for i in range(len(df))]
+        return df
+
+    def extract_sql_url_from_line(self, text, lines):
+        # 需要解决这种情况：mysql+pymysql://{username}:{password}@{host}:{port}/{database}?charset=utf8
+        reg = '(?<=[\"\'`]).+\+.+:\/\/.+\:.+@.+\/.+(?=[\"\'`])'
+        sql_urls = re.findall(reg, text)
+        if len(sql_urls) != 0:
+            if self.check_f_string(text) == True and self.check_comment(text) == False:
+                try:
+                    sql_url = self.recover_f_string(text, lines)
+                    return [sql_url]
+                except:
+                    pass
+        return sql_urls
+
+    def extract_api(self):
+        if self.project_type == 'yard-base':
+            df = self.extract_api_from_yard_base()
+        elif self.project_type == 'api-framework':
+            df = self.extract_api_from_api_framework()
+        elif self.project_type == 'frontend':
+            df = self.extract_api_from_frontend()
+        else:
+            df = pd.DataFrame()
+        return df
+
+    def extract_api_from_line(self, text):
+        reg_with_port = '(?<=[\"\'`])[http|https].+/.+:[0-9]+.+(?=[\"\'`])'
+        apis_with_port = re.findall(reg_with_port, text)
+
+        # reg = '(?<=[\"\'])/.+/.+(?=[\"\'])'
+        # reg = '/.+/.+(?=[\"\'`])'
+        reg = '(?<=[\"\'`])/.*?(?=[\"\'`])'
+        apis_without_port = re.findall(reg, text)
+
+        apis = set(apis_with_port + apis_without_port)
+        apis = [api for api in apis if ' ' not in api or '<' not in api or '(' not in api]
+        apis = [api for api in apis if len(api) < 100 and len(api) > 4]
+        return apis
+
+    def extract_api_from_yard_base(self):
+        def get_default_url_name(cls_name):
+            p = re.compile(r'([a-z]|\d)([A-Z])')
+            return re.sub(p, r'\1-\2', cls_name).lower().replace('.py', '')
+
+        def get_class_name(file):
+            if file.endswith('.py'):
+                with open(file, 'r') as f:
+                    try:
+                        lines = f.readlines()
+                        for line in lines:
+                            if 'class' in line and 'AbstractApi' in line:
+                                class_name = line.split('class')[1].split('(AbstractApi')[0].replace(' ', '')
+                                return class_name
+                    except UnicodeDecodeError:
+                        return False
+            return False
+
+        # def check_AbstractApi(file_name, package_name):
+        #     不管用什么方法，都会由于api文件内的导包依旧找不到路径而 报错 ModuleNotFoundError: No module named 'framework'
+        #     def find_module(self, fullname, path=None):
+        #         import imp
+        #         import sys
+        #         try:
+        #             # 1. Try imp.find_module(), which searches sys.path, but does
+        #             # not respect PEP 302 import hooks.
+        #             result = imp.find_module(fullname, path)
+        #             if result:
+        #                 return result
+        #         except ImportError:
+        #             pass
+        #         if path is None:
+        #             path = sys.path
+        #         for item in path:
+        #             # 2. Scan path for import hooks. sys.path_importer_cache maps
+        #             # path items to optional "importer" objects, that implement
+        #             # find_module() etc.  Note that path must be a subset of
+        #             # sys.path for this to work.
+        #             importer = sys.path_importer_cache.get(item)
+        #             if importer:
+        #                 try:
+        #                     result = importer.find_module(fullname, [item])
+        #                     if result:
+        #                         return result
+        #                 except ImportError:
+        #                     pass
+        #         raise ImportError("%s not found" % fullname)
+        #     if file_name.endswith('.py') and not file_name.startswith('__init__'):
+        #         cmd = f"{package_name.replace('/', '.')}.{file_name[:-3]}"
+        #         print(file_name, package_name)
+        #         import imp
+        #         import sys
+        #         # print(file_name[:-3], [package_name.replace('.', '/')])
+        #         # fp, path, descrip = find_module(file_name[:-3], ['/'+package_name.replace('.', '/')])
+
+        #         import importlib.machinery
+        #         modulename = importlib.machinery.SourceFileLoader('pollutant_emission_monitoring', '/Users/wangfeihong/Desktop/meishan-middle-layer/src/app/bluesky/pollution_emergency_control/middle/pollutant_emission_monitoring.py').load_module()
+        #         spec = importlib.util.spec_from_file_location('middle.pollutant_emission_monitoring', '/Users/wangfeihong/Desktop/meishan-middle-layer/src/app/bluesky/pollution_emergency_control/middle/pollutant_emission_monitoring.py')
+        #         module = importlib.import_module(f"{'package_name'.replace('/', '.')}.{file_name[:-3]}")
+        #         cls_list = inspect.getmembers(module, inspect.isclass)
+        #         for cls_name, cls in cls_list:
+        #             if cls != AbstractApi and issubclass(cls, AbstractApi):
+        #                 return True
+        datas = []
+        app_path = os.path.join(self.module_path, 'src', 'app')
+        for dir_path, dir_names, files in os.walk(app_path):
+            for file in files:
+                if '__pycache__' in dir_path:
+                    continue
+                file_full_path = os.path.join(dir_path, file)
+                class_name = get_class_name(file_full_path)
+                if class_name:
+                    file_path = os.path.join(dir_path.replace(app_path, ''), file)
+                    path1, path2 = os.path.split(file_path)
+                    if path1[0] != '/':
+                        path1 = '/' + path1
+
+                    url = os.path.join(path1, get_default_url_name(class_name))
+                    # url = '/'.join([get_default_url_name(item) for item in file_path.split('/')])
+                    datas.append({
+                        'file': file_full_path.replace(self.module_path, ''),
+                        'api': url,
+                        'line': '-'})
+        df = pd.DataFrame(datas)
+        df.index = [i for i in range(len(df))]
+        return df
+
+    def extract_api_from_api_framework(self):
+        datas = []
+        for dir_path, dir_names, files in os.walk(self.module_path):
+            for file in files:
+                single_file_urls = []
+                if file == '__init__.py':
+                    with open(os.path.join(dir_path, file), 'r') as f:
+                        try:
+                            lines = f.readlines()
+                            for line in lines:
+                                if 'Blueprint(' in line:
+                                    reg = '(?<=[\"\'`]).+(?=[\"\'`])'
+                                    Blueprint_name = re.findall(reg, line)[0]
+                                if 'add_resource(' in line:
+                                    reg = '(?<=[\"\'`]).+(?=[\"\'`])'
+                                    url = re.findall(reg, line)
+                                    single_file_urls.extend(url)
+                        except UnicodeDecodeError:
+                            continue
+                if len(single_file_urls) > 0:
+                    single_file_urls = ['/' + Blueprint_name + url for url in single_file_urls]
+                    data = [{'file': os.path.abspath(os.path.join(dir_path, file)).replace(self.module_path, ''),
+                             'api': api,
+                             'line': '-'} for api in single_file_urls]
+                    datas.extend(data)
+        df = pd.DataFrame(datas)
+        df.index = [i for i in range(len(df))]
+        return df
+
+    def extract_api_from_frontend(self):
+        datas = []
+        for root, dirs, files in os.walk(self.module_path, topdown=False):
+            if os.path.join(self.module_path, 'node_modules') in root:
+                continue
+            for file in files:
+                if os.path.splitext(file)[1] in ['.js', '.ts', '.tsx']:
+                    filepath = os.path.join(root, file)
+                    with open(filepath, 'r') as f:
+                        lines = f.readlines()
+                        for idx, line in enumerate(lines):
+                            if 'from' in line or 'import' in line:
+                                continue
+                            apis = self.extract_api_from_line(line)
+                            data = [{'file': os.path.abspath(filepath).replace(self.module_path, ''), 'api': api,
+                                     'line': idx + 1} for api in apis]
+                            datas.extend(data)
+        df = pd.DataFrame(datas)
+        df.index = [i for i in range(len(df))]
+        return df
 
 
 class SingleFilechecker():
@@ -322,7 +573,8 @@ class SingleFilechecker():
             if isinstance(item, (FunctionDef, ClassDef)):
                 length = item.end_lineno - item.fromlineno
                 if length > min_length and item.doc == None:
-                    self.write(f'{self.filepath}:{item.fromlineno}:NC001:[{item.name}] Function or Class has no comments (no comments)')
+                    self.write(
+                        f'{self.filepath}:{item.fromlineno}:NC001:[{item.name}] Function or Class has no comments (no comments)')
 
     def check(self, if_pylint=True, if_print=True):
         if if_pylint:
@@ -343,6 +595,7 @@ class SingleFilechecker():
         fileObj = open(self.output, 'r')
         for line in fileObj.readlines():
             print(line)
+
 
 """
 由于使用多进程的原因
