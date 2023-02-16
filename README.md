@@ -48,5 +48,5 @@ Ysrd Linter是融合了google代码规范及公司内部一些开发规范形成
 新增功能:
 
     1.提取项目中的接口 ysrd_linter.extract_api()
-    2.提取项目中的数据库链接 ysrd_linter.extract_sql_url()
+    2.提取项目中的数据库链接 ysrd_linter.extract_database_url()
    

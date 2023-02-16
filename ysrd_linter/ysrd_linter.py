@@ -213,6 +213,8 @@ class YsrdLinter():
 
     def check_comment(self, text):
         text = text.replace(' ', '')
+        if len(text) == 0:
+            return False
         if text[0] == '#':
             return True
         return False
@@ -234,7 +236,7 @@ class YsrdLinter():
             f_string = f_string.replace('{' + f'{var_name}' + '}', var_dict[var_name])
         return f_string.replace(' ', '')
 
-    def extract_sql_url(self):
+    def extract_database_url(self):
         datas = []
         for root, dirs, files in os.walk(self.module_path, topdown=False):
             for file in files:
@@ -243,30 +245,37 @@ class YsrdLinter():
                     with open(filepath, 'r') as f:
                         lines = f.readlines()
                         for idx, line in enumerate(lines):
-                            sql_urls = self.extract_sql_url_from_line(line, lines)
-                            if len(sql_urls) == 0:
+                            database_url = self.extract_database_url_from_line(line, lines)
+                            if database_url == None:
                                 continue
-                            data = [
-                                {'file': os.path.abspath(filepath).replace(self.module_path, ''),
-                                 'sql_url': sql_url.replace(re.findall('(?<=\/\/).+?(?=\@)', sql_url)[0], '账号密码已打码'), # 这里加密一下密码字段
-                                 'line': idx + 1, 'text': line} for sql_url in sql_urls]
-                            datas.extend(data)
+                            data = {'file': os.path.abspath(filepath).replace(self.module_path, ''),
+                                 'database_url': database_url.replace(re.search('(?<=\/\/).+?(?=\@)', database_url).group(), '账号密码已打码'), # 这里加密一下密码字段
+                                 'line': idx + 1, 'text': line}
+                            datas.append(data)
         df = pd.DataFrame(datas)
         df.index = [i for i in range(len(df))]
         return df
 
-    def extract_sql_url_from_line(self, text, lines):
+    def extract_database_url_from_line(self, text, lines):
         # 需要解决这种情况：mysql+pymysql://{username}:{password}@{host}:{port}/{database}?charset=utf8
-        reg = '(?<=[\"\'`]).+\+.+:\/\/.+\:.+@.+\/.+(?=[\"\'`])'
-        sql_urls = re.findall(reg, text)
-        if len(sql_urls) != 0:
-            if self.check_f_string(text) == True and self.check_comment(text) == False:
-                try:
-                    sql_url = self.recover_f_string(text, lines)
-                    return [sql_url]
-                except:
-                    pass
-        return sql_urls
+        # reg = '(?<=[\"\'`]).+\+.+:\/\/.+\:.+@.+\/.+(?=[\"\'`])'
+        if self.check_comment(text) == True:
+            return None
+
+        reg = '(?<=[\"\'])[^\"\']+\+.+:\/\/.+\:.+@.+\/.+(?=[\"\'`])'
+        result = re.search(reg, text)
+
+        if result == None:
+            return None
+        else:
+            database_url = result.group()
+        if self.check_f_string(text) == True:
+            try:
+                database_url = self.recover_f_string(text, lines)
+                return re.search(reg, database_url).group()
+            except:
+                pass
+        return database_url
 
     def extract_api(self):
         if self.project_type == 'yard-base':

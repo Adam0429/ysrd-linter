@@ -32,8 +32,8 @@ linter = YsrdLinter(filepath='/Users/wangfeihong/Desktop/gitlab-checker/')
 # linter = YsrdLinter(filepath='/Users/wangfeihong/Desktop/gitlabchecker_frontend')
 
 # df = linter.extract_api()
-df = linter.extract_sql_url()
+df = linter.extract_database_url()
 
 print(df)
 # import pandas as pd
-df.to_csv('sql_url.csv', encoding='gb18030')
+df.to_csv('database_url.csv', encoding='gb18030')
